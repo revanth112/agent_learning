@@ -69,15 +69,7 @@ source .venv/bin/activate
 
 ### 2. Install dependencies
 
-Create `requirements.txt`:
-
-``` text
-openai
-python-dotenv
-pandas
-```
-
-Then run:
+Run:
 
 ``` bash
 pip install -r requirements.txt
