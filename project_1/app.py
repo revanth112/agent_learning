@@ -13,16 +13,16 @@ load_dotenv()
 
 
 # --------------------------------------------------
-# 2. CREATE XAI CLIENT USING OPENAI SDK
+# 2. CREATE GROQ CLIENT USING OPENAI SDK
 # --------------------------------------------------
 
 client = OpenAI(
-    api_key=os.getenv("XAI_API_KEY"),
-    base_url="https://api.x.ai/v1",
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
 )
 
 
-MODEL = "grok-4.3"
+MODEL = "openai/gpt-oss-20b"
 
 
 # --------------------------------------------------
@@ -99,12 +99,19 @@ def execute_tool(tool_name: str, arguments: dict):
 # 6. USER QUESTION
 # --------------------------------------------------
 
-user_question = "What is my name?"
+user_question = "What all the info you know about me?"
 
 
 # --------------------------------------------------
 # 7. FIRST LLM CALL
 # --------------------------------------------------
+
+input_list=[
+        {
+            "role": "user",
+            "content": user_question
+        }
+    ]
 
 response = client.responses.create(
 
@@ -121,12 +128,7 @@ Use an available tool only when the information required
 to answer the question must be retrieved from that tool.
 """,
 
-    input=[
-        {
-            "role": "user",
-            "content": user_question
-        }
-    ],
+    input=input_list,
 
     tools=tools
 )
@@ -182,13 +184,25 @@ for item in response.output:
 
 if tool_outputs:
 
+    input_list+=response.output
+
+    input_list+=tool_outputs
+
     final_response = client.responses.create(
 
         model=MODEL,
 
-        previous_response_id=response.id,
+        instructions="""
+            You are a customer support assistant.
 
-        input=tool_outputs
+            The current authenticated customer's ID is CUST001.
+
+            Answer the user's question using the tool result.
+            """,
+
+        input=input_list,
+
+        tools=tools
     )
 
     print("\nFINAL ANSWER:")
