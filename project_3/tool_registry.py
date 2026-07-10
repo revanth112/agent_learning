@@ -1,21 +1,8 @@
-import json
-
-
 class ToolRegistry:
-
     def __init__(self):
-
         self.tools = {}
 
-
-    def register(
-        self,
-        name,
-        description,
-        parameters,
-        function
-    ):
-
+    def register(self, name, description, parameters, function):
         self.tools[name] = {
             "name": name,
             "description": description,
@@ -23,54 +10,49 @@ class ToolRegistry:
             "function": function,
         }
 
+    def schemas(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["parameters"],
+                },
+            }
+            for t in self.tools.values()
+        ]
 
-    def list_tools(self):
-
-        result = []
-
-        for name, tool in self.tools.items():
-
-            result.append(
-                {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["parameters"],
-                }
-            )
-
-        return result
-
-
-    def get_openai_tool_schemas(self):
-
-        schemas = []
-
-        for name, tool in self.tools.items():
-
-            schemas.append(
-                {
-                    "type": "function",
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["parameters"],
-                }
-            )
-
-        return schemas
-
-
-    def execute(
-        self,
-        name,
-        arguments
-    ):
-
+    def execute(self, name, arguments):
         if name not in self.tools:
+            raise ValueError(f"Unknown tool: {name}")
+        return self.tools[name]["function"](**arguments)
+class ToolRegistry:
+    def __init__(self):
+        self.tools = {}
 
-            raise ValueError(
-                f"Tool not found: {name}"
-            )
+    def register(self, name, description, parameters, function):
+        self.tools[name] = {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+            "function": function,
+        }
 
-        function = self.tools[name]["function"]
+    def schemas(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["parameters"],
+                },
+            }
+            for t in self.tools.values()
+        ]
 
-        return function(**arguments)
+    def execute(self, name, arguments):
+        if name not in self.tools:
+            raise ValueError(f"Unknown tool: {name}")
+        return self.tools[name]["function"](**arguments)
