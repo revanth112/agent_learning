@@ -43,9 +43,7 @@ ai-agents-from-scratch/
 │
 └── project_3/
     ├── app.py
-    ├── tool_registry.py
-    ├── README.md
-    └── requirements.txt
+    └── tool_registry.py
 ```
 
 ## Setup
