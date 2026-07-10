@@ -27,7 +27,7 @@ where the loop lives, and how dynamic tool creation can be designed.
 
 ## Repository Structure
 
-``` text
+```text
 ai-agents-from-scratch/
 │
 ├── .env
@@ -44,26 +44,27 @@ ai-agents-from-scratch/
 └── project_3/
     ├── app.py
     ├── tool_registry.py
-    └── generated_tools/
+    ├── README.md
+    └── requirements.txt
 ```
 
 ## Setup
 
 ### 1. Create a virtual environment
 
-``` bash
+```bash
 python -m venv .venv
 ```
 
 Activate it on Windows:
 
-``` bash
+```bash
 .venv\Scripts\activate
 ```
 
 Activate it on macOS/Linux:
 
-``` bash
+```bash
 source .venv/bin/activate
 ```
 
@@ -71,7 +72,7 @@ source .venv/bin/activate
 
 Run:
 
-``` bash
+```bash
 pip install -r requirements.txt
 ```
 
@@ -79,15 +80,15 @@ pip install -r requirements.txt
 
 Create a `.env` file:
 
-``` text
-XAI_API_KEY=your_api_key_here
+```text
+GROQ_API_KEY=your_api_key_here
 ```
 
 Do not commit `.env`.
 
 Suggested `.gitignore`:
 
-``` text
+```text
 .env
 .venv/
 __pycache__/
@@ -103,7 +104,7 @@ boundary. Project 2 adds the repeated action-observation loop. Project 3
 adds a controlled mechanism for creating a missing analytical
 capability.
 
-``` bash
+```bash
 python project_1/app.py
 python project_2/app.py
 python project_3/app.py
@@ -123,7 +124,7 @@ are:
 
 ## Mental Model
 
-``` text
+```text
 LLM Call:
 User → LLM → Answer
 
@@ -165,7 +166,7 @@ whether the tool is required.
 
 ## Architecture
 
-``` text
+```text
 USER
  │
  │ "What is my name?"
@@ -198,7 +199,7 @@ If the user asks something unrelated, such as:
 the model should answer directly without calling the customer-profile
 tool.
 
-``` text
+```text
                  USER
                    │
                    ▼
@@ -227,7 +228,7 @@ model.
 
 The LLM receives a schema conceptually like:
 
-``` text
+```text
 Tool name:
 get_customer_profile
 
@@ -240,7 +241,7 @@ customer_id: string
 
 The LLM may request:
 
-``` json
+```json
 {
   "name": "get_customer_profile",
   "arguments": {
@@ -251,20 +252,20 @@ The LLM may request:
 
 Your application executes:
 
-``` python
+```python
 get_customer_profile(customer_id="CUST001")
 ```
 
 The boundary is:
 
-``` text
+```text
 LLM → DECIDES
 APPLICATION → EXECUTES
 ```
 
 ## Complete Code
 
-``` text
+```text
 Available in git repo under project_1 folder
 ```
 
@@ -307,7 +308,7 @@ user.
 
 ## Architecture
 
-``` text
+```text
 USER
  │
  │ "Can I do a 3-day Goa trip for ₹20,000?"
@@ -365,7 +366,7 @@ FINAL ANSWER
 
 The generic loop is:
 
-``` text
+```text
               ┌─────────────────────┐
               │                     │
               ▼                     │
@@ -387,7 +388,7 @@ USER ──────► LLM                    │
 
 Project 1 is approximately:
 
-``` text
+```text
 Question
   ↓
 Tool?
@@ -397,7 +398,7 @@ Answer
 
 Project 2 is:
 
-``` text
+```text
 Goal
  ↓
 Choose next action
@@ -424,7 +425,7 @@ The agentic decision becomes:
 
 ## Complete Code
 
-``` text
+```text
 Available in git repo under project_2 folder
 ```
 
@@ -443,17 +444,61 @@ Available in git repo under project_2 folder
 
 The core loop is:
 
-``` python
-for iteration in range(MAX_ITERATIONS):
+```python
+for iteration in range(1, MAX_ITERATIONS + 1):
 ```
 
-The finish condition is:
+Project 2 now uses the Chat Completions tool-calling pattern with explicit `messages` history.
 
-``` python
-if not tool_outputs:
-    print(response.output_text)
+```text
+system message
+user goal
+assistant tool-call message
+tool observation
+assistant next decision
+tool observation
+...
+final assistant answer
+```
+
+The loop handles three states:
+
+```text
+1. Tool calls exist
+   → execute every requested tool
+   → append observations
+   → call the model again
+
+2. No tool call, but final text exists
+   → print the final answer
+   → stop
+
+3. No tool call and no final text
+   → treat the task as incomplete
+   → add a continuation message
+   → call the model again
+```
+
+A simplified finish flow is:
+
+```python
+tool_calls = assistant_message.tool_calls or []
+
+if tool_calls:
+    # append assistant tool-call message
+    # execute tools
+    # append role="tool" observations
+    # call model again
+    continue
+
+final_text = (assistant_message.content or "").strip()
+
+if final_text:
+    print(final_text)
     break
 ```
+
+`MAX_ITERATIONS` prevents uncontrolled loops. The model may request one tool or multiple independent tools in the same turn.
 
 ------------------------------------------------------------------------
 
@@ -461,7 +506,7 @@ if not tool_outputs:
 
 ## Repository Description
 
-A self-extending AI agent built with Python, Grok API, and OpenAI SDK.
+A self-extending AI agent built with Python, the Groq API, and the OpenAI SDK.
 The agent autonomously selects tools, identifies missing capabilities,
 generates new Python tools at runtime, validates and tests them in a
 controlled environment, dynamically registers successful tools, and uses
@@ -478,7 +523,7 @@ Example user goal:
 
 Initial dataset:
 
-``` text
+```text
 product     price     quantity
 Laptop      50000     2
 Mouse       1000      20
@@ -496,7 +541,7 @@ There is initially no tool that calculates revenue contribution.
 
 ## Architecture
 
-``` text
+```text
 USER GOAL
    │
    ▼
@@ -555,7 +600,7 @@ TEST EXECUTION
 
 A normal agent receives domain tools such as:
 
-``` text
+```text
 read_csv
 list_columns
 describe_data
@@ -563,13 +608,13 @@ describe_data
 
 A self-extending system also receives a meta-tool such as:
 
-``` text
+```text
 request_new_tool
 ```
 
 Conceptually:
 
-``` text
+```text
                  AGENT
                    │
          ┌─────────┼─────────┐
@@ -601,7 +646,7 @@ The developer must control:
 
 Two logical roles are useful:
 
-``` text
+```text
               MAIN AGENT
                   │
                   │ Missing capability
@@ -645,11 +690,27 @@ The Tool Builder focuses on:
 
 ## Tool Registry Code
 
-``` text
-Available in git repo under project_3 folder as tool_registry.py
+The current registry stores executable Python functions together with their descriptions and JSON parameter schemas.
+
+For Chat Completions, tools are exposed in this format:
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "tool_name",
+    "description": "What the tool does",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+}
 ```
 
-``` python
+The current registry is conceptually:
+
+```python
 class ToolRegistry:
 
     def __init__(self):
@@ -662,7 +723,6 @@ class ToolRegistry:
         parameters,
         function
     ):
-
         self.tools[name] = {
             "name": name,
             "description": description,
@@ -670,54 +730,31 @@ class ToolRegistry:
             "function": function,
         }
 
-    def list_tools(self):
-
-        result = []
-
-        for name, tool in self.tools.items():
-
-            result.append(
-                {
+    def schemas(self):
+        return [
+            {
+                "type": "function",
+                "function": {
                     "name": tool["name"],
                     "description": tool["description"],
                     "parameters": tool["parameters"],
-                }
-            )
-
-        return result
-
-    def get_openai_tool_schemas(self):
-
-        schemas = []
-
-        for name, tool in self.tools.items():
-
-            schemas.append(
-                {
-                    "type": "function",
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["parameters"],
-                }
-            )
-
-        return schemas
+                },
+            }
+            for tool in self.tools.values()
+        ]
 
     def execute(self, name, arguments):
-
         if name not in self.tools:
-            raise ValueError(f"Tool not found: {name}")
+            raise ValueError(f"Unknown tool: {name}")
 
-        function = self.tools[name]["function"]
-
-        return function(**arguments)
+        return self.tools[name]["function"](**arguments)
 ```
 
 ## Tool Creation Flow
 
 The main agent can call:
 
-``` text
+```text
 request_new_tool(
     requirement="Calculate revenue contribution percentage for each product."
 )
@@ -725,20 +762,23 @@ request_new_tool(
 
 Behind that function, the application:
 
-1.  Sends the requirement to a Tool Builder LLM.
-2.  Requests exactly one restricted Python function.
-3.  Parses the generated source code.
-4.  Applies AST checks.
-5.  Executes tests in a restricted test process.
-6.  Rejects failed tools.
-7.  Converts passing code into a callable function.
-8.  Registers it in the tool registry.
-9.  Refreshes tool schemas sent to the main agent.
-10. Allows the main agent to call the new tool.
+1. Sends the requirement to a Tool Builder LLM.
+2. Requests one restricted function named `generated_tool(records)`.
+3. Cleans the generated source and rejects empty output.
+4. Parses the code with Python AST.
+5. Rejects blocked syntax, names, and attributes.
+6. Runs the generated code in a separate subprocess with a timeout.
+7. Tests it against known input with known expected output.
+8. Rejects code that fails execution or semantic validation.
+9. Registers `generated_dataset_analysis` only after testing passes.
+10. Refreshes the Chat Completions tool schemas.
+11. Lets the main agent call the newly registered tool.
+
+The current implementation avoids `exec()` inside the main agent process. Generated code is run through a temporary Python subprocess. This improves separation for a learning project, but it is still not a production security sandbox.
 
 ## Example Tool Builder Prompt
 
-``` text
+```text
 You are a Python tool builder.
 
 Create exactly one Python function.
@@ -776,7 +816,7 @@ The code must be deterministic.
 
 ## Example Generated Tool
 
-``` python
+```python
 def generated_tool(records):
 
     revenues = []
@@ -820,7 +860,7 @@ def generated_tool(records):
 
 Before tool creation:
 
-``` text
+```text
 Tool Registry
 ├── list_columns
 ├── describe_data
@@ -829,7 +869,7 @@ Tool Registry
 
 After successful generation and testing:
 
-``` text
+```text
 Tool Registry
 ├── list_columns
 ├── describe_data
@@ -837,19 +877,107 @@ Tool Registry
 └── request_new_tool
 ```
 
-The main agent loop refreshes available schemas:
+The main agent loop refreshes available schemas on every model call:
 
-``` python
-response = client.responses.create(
+```python
+response = client.chat.completions.create(
     model=MODEL,
-    previous_response_id=response.id,
-    input=tool_outputs,
-    tools=get_current_tools()
+    messages=messages,
+    tools=current_tools(),
+    tool_choice="auto",
+    temperature=0,
 )
 ```
 
-This refresh matters because the newly registered tool must become
-visible to the model in the next decision step.
+`current_tools()` returns the latest registry schemas plus the `request_new_tool` meta-tool. The newly registered `generated_dataset_analysis` tool becomes visible to the model on the next call.
+
+Project 3 uses explicit Chat Completions history. After the assistant requests a tool, the application appends the assistant tool-call message and then the matching tool observation:
+
+```python
+messages.append(
+    assistant_message.model_dump(
+        exclude_none=True
+    )
+)
+
+messages.append(
+    {
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "name": tool_name,
+        "content": json.dumps(result),
+    }
+)
+```
+
+The project does not use `previous_response_id`.
+
+## Current API Pattern
+
+The current projects use:
+
+```text
+Provider: Groq
+SDK: OpenAI Python SDK
+Model: openai/gpt-oss-20b
+Base URL: https://api.groq.com/openai/v1
+Environment variable: GROQ_API_KEY
+```
+
+Projects 2 and 3 use Chat Completions tool calling:
+
+```text
+messages
+   │
+   ▼
+LLM decision
+   │
+   ├── tool call → Python executes → role="tool" observation
+   │                                  │
+   └──────────────────────────────────┘
+   │
+   ▼
+next LLM decision
+   │
+   ▼
+final answer
+```
+
+The application owns the orchestration loop and message history.
+
+The current code does not pass `include_reasoning=False` to `chat.completions.create()`. Some OpenAI SDK versions do not expose that keyword in the method signature, causing a local `TypeError` before a request is sent.
+
+## Project 3 File Structure
+
+```text
+project_3/
+├── app.py
+├── tool_registry.py
+├── README.md
+└── requirements.txt
+```
+
+Responsibilities:
+
+```text
+app.py
+├── Groq/OpenAI SDK setup
+├── sample dataset
+├── existing tools
+├── AST validation
+├── Tool Builder LLM call
+├── subprocess execution helper
+├── semantic testing
+├── request_new_tool meta-tool
+├── dynamic registration
+├── main agent prompt
+└── main agent loop
+
+tool_registry.py
+├── register tools
+├── expose Chat Completions schemas
+└── execute registered functions
+```
 
 ## Safety Note
 
@@ -895,7 +1023,7 @@ environment with controls such as:
 
 ## Project 1
 
-``` text
+```text
 User
  ↓
 LLM
@@ -913,7 +1041,7 @@ Main learning:
 
 ## Project 2
 
-``` text
+```text
 Goal
  ↓
 LLM
@@ -937,7 +1065,7 @@ Main learning:
 
 ## Project 3
 
-``` text
+```text
 Goal
  ↓
 Main Agent
@@ -971,19 +1099,19 @@ Main learning:
 
 The progression is:
 
-``` text
+```text
 LEVEL 0 — LLM CALL
 
 User → LLM → Answer
 ```
 
-``` text
+```text
 LEVEL 1 — TOOL-USING AGENT
 
 User → LLM → Tool → Observation → LLM → Answer
 ```
 
-``` text
+```text
 LEVEL 2 — MULTI-STEP AGENT
 
            ┌──────────────────────┐
@@ -995,7 +1123,7 @@ User → Agent → Action → Observation
                   Finish
 ```
 
-``` text
+```text
 LEVEL 3 — SELF-EXTENDING AGENT
 
 Goal
