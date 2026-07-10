@@ -1,795 +1,573 @@
-import os
 import ast
 import json
-import tempfile
+import os
 import subprocess
+import sys
+import tempfile
+import time
 
 import pandas as pd
-
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 
 from tool_registry import ToolRegistry
 
-
-# --------------------------------------------------
-# 1. SETUP
-# --------------------------------------------------
-
 load_dotenv()
 
-
 client = OpenAI(
-    api_key=os.getenv("XAI_API_KEY"),
-    base_url="https://api.x.ai/v1",
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1",
 )
 
-
-MODEL = "grok-4.3"
-
-
+MODEL = "openai/gpt-oss-20b"
 registry = ToolRegistry()
 
-
-# --------------------------------------------------
-# 2. SAMPLE DATA
-# --------------------------------------------------
-
-DATAFRAME = pd.DataFrame(
-    {
-        "product": [
-            "Laptop",
-            "Mouse",
-            "Keyboard",
-            "Monitor",
-        ],
-
-        "price": [
-            50000,
-            1000,
-            3000,
-            15000,
-        ],
-
-        "quantity": [
-            2,
-            20,
-            10,
-            5,
-        ],
-    }
-)
+DATAFRAME = pd.DataFrame({
+    "product": ["Laptop", "Mouse", "Keyboard", "Monitor"],
+    "price": [50000, 1000, 3000, 15000],
+    "quantity": [2, 20, 10, 5],
+})
 
 
-# --------------------------------------------------
-# 3. EXISTING NORMAL TOOLS
-# --------------------------------------------------
+# ---------------- EXISTING TOOLS ----------------
 
-def list_columns() -> dict:
-
-    return {
-        "columns": DATAFRAME.columns.tolist()
-    }
+def list_columns():
+    return {"columns": DATAFRAME.columns.tolist()}
 
 
-def describe_data() -> dict:
-
+def describe_data():
     return {
         "rows": len(DATAFRAME),
-
         "columns": DATAFRAME.columns.tolist(),
-
-        "sample": DATAFRAME.head().to_dict(
-            orient="records"
-        )
+        "records": DATAFRAME.to_dict(orient="records"),
     }
 
 
-# --------------------------------------------------
-# 4. REGISTER EXISTING TOOLS
-# --------------------------------------------------
+EMPTY_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
 
 registry.register(
+    "list_columns",
+    "List the columns in the sales dataset.",
+    EMPTY_SCHEMA,
+    list_columns,
+)
 
-    name="list_columns",
-
-    description=(
-        "List all column names available in the sales dataset."
-    ),
-
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": False
-    },
-
-    function=list_columns
+registry.register(
+    "describe_data",
+    "Return the dataset columns and records.",
+    EMPTY_SCHEMA,
+    describe_data,
 )
 
 
-registry.register(
-
-    name="describe_data",
-
-    description=(
-        "Return the sales dataset structure and sample records."
-    ),
-
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": False
-    },
-
-    function=describe_data
-)
-
-
-# --------------------------------------------------
-# 5. CODE SAFETY CHECK
-# --------------------------------------------------
+# ---------------- GENERATED CODE VALIDATION ----------------
 
 BLOCKED_NODES = (
-    ast.Import,
-    ast.ImportFrom,
+    ast.Import, ast.ImportFrom, ast.ClassDef,
+    ast.AsyncFunctionDef, ast.Lambda,
+    ast.Global, ast.Nonlocal, ast.With, ast.AsyncWith,
 )
 
-
 BLOCKED_NAMES = {
-    "eval",
-    "exec",
-    "compile",
-    "open",
-    "__import__",
-    "input",
-    "globals",
-    "locals",
-    "vars",
+    "eval", "exec", "compile", "open", "__import__",
+    "input", "globals", "locals", "vars",
+    "getattr", "setattr", "delattr",
+}
+
+BLOCKED_ATTRS = {
+    "system", "popen", "spawn", "fork",
+    "remove", "unlink", "rmdir", "rmtree",
+    "socket", "connect", "urlopen",
 }
 
 
-BLOCKED_ATTRIBUTES = {
-    "system",
-    "popen",
-    "remove",
-    "unlink",
-    "rmdir",
-    "rmtree",
-    "socket",
-}
-
-
-def validate_generated_code(code: str):
-
+def validate_code(code):
     tree = ast.parse(code)
 
+    functions = [
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef)
+    ]
+
+    if len(functions) != 1:
+        raise ValueError("Exactly one top-level function is required.")
+
+    fn = functions[0]
+
+    if fn.name != "generated_tool":
+        raise ValueError("Function must be named generated_tool.")
+
+    if len(fn.args.args) != 1 or fn.args.args[0].arg != "records":
+        raise ValueError(
+            "Required signature: generated_tool(records)"
+        )
+
+    if fn.args.vararg or fn.args.kwarg or fn.args.kwonlyargs:
+        raise ValueError("Extra function arguments are not allowed.")
 
     for node in ast.walk(tree):
-
         if isinstance(node, BLOCKED_NODES):
-
             raise ValueError(
-                "Generated code contains imports."
+                f"Blocked syntax: {type(node).__name__}"
             )
 
+        if isinstance(node, ast.Name) and node.id in BLOCKED_NAMES:
+            raise ValueError(f"Blocked name: {node.id}")
 
-        if isinstance(node, ast.Name):
-
-            if node.id in BLOCKED_NAMES:
-
-                raise ValueError(
-                    f"Blocked name used: {node.id}"
-                )
+        if isinstance(node, ast.Attribute) and node.attr in BLOCKED_ATTRS:
+            raise ValueError(f"Blocked attribute: {node.attr}")
 
 
-        if isinstance(node, ast.Attribute):
+# ---------------- TOOL BUILDER ----------------
 
-            if node.attr in BLOCKED_ATTRIBUTES:
+BUILDER_PROMPT = """
+You generate one restricted Python function.
 
-                raise ValueError(
-                    f"Blocked attribute used: {node.attr}"
-                )
+Return only Python source code.
 
-
-    return True
-
-
-# --------------------------------------------------
-# 6. ASK LLM TO BUILD A TOOL
-# --------------------------------------------------
-
-def build_tool_with_llm(
-    requirement: str
-) -> dict:
-
-    builder_prompt = f"""
-You are a Python tool builder.
-
-Create exactly one Python function.
-
-REQUIREMENT:
-
-{requirement}
-
-
-RULES:
-
-1. The function must be named:
-
-generated_tool
-
-
-2. The function must accept exactly one argument:
-
-records
-
-
-3. records will be a list of dictionaries.
-
-Example:
-
-[
-    {{
-        "product": "Laptop",
-        "price": 50000,
-        "quantity": 2
-    }}
-]
-
-
-4. Return only JSON-serializable Python values.
-
-Allowed return values:
-
-- dict
-- list
-- string
-- integer
-- float
-- boolean
-- None
-
-
-5. Do not import anything.
-
-6. Do not access:
-- filesystem
-- network
-- environment variables
-- subprocesses
-- shell commands
-
-7. Do not use:
-- eval
-- exec
-- compile
-- open
-- __import__
-
-8. Return ONLY Python code.
-
-9. Do not use Markdown code fences.
-
-10. The code must be deterministic.
+Requirements:
+- exact function name: generated_tool
+- exact signature: generated_tool(records)
+- records is a list of dictionaries
+- return JSON-serializable data
+- no imports
+- no file access
+- no network access
+- no environment access
+- no subprocesses or shell commands
+- no eval, exec, compile, open, or __import__
+- no printing
+- no Markdown fences
+- deterministic implementation
 """
 
 
-    response = client.responses.create(
+def clean_code(code):
+    code = code.strip()
+
+    if code.startswith("```"):
+        lines = code.splitlines()
+        lines = lines[1:]
+
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        code = "\n".join(lines).strip()
+
+    return code
+
+
+def build_tool(requirement):
+
+    response = client.chat.completions.create(
 
         model=MODEL,
 
-        input=[
+        temperature=0,
+
+        messages=[
+            {
+                "role": "system",
+                "content": BUILDER_PROMPT
+            },
             {
                 "role": "user",
-                "content": builder_prompt
+                "content": f"""
+                Create a tool for this requirement:
+
+                {requirement}
+                """
             }
         ]
+
     )
 
 
-    code = response.output_text.strip()
+    code = clean_code(
+
+        response.choices[0].message.content or ""
+
+    )
 
 
-    return {
-        "code": code
-    }
+    if not code:
+
+        raise ValueError(
+
+            "Tool Builder returned empty code."
+
+        )
 
 
-# --------------------------------------------------
-# 7. TEST GENERATED TOOL
-# --------------------------------------------------
-
-def test_generated_tool(
-    code: str
-) -> dict:
-
-    validate_generated_code(code)
+    validate_code(code)
 
 
-    test_records = [
-        {
-            "product": "A",
-            "price": 100,
-            "quantity": 2,
-        },
-        {
-            "product": "B",
-            "price": 200,
-            "quantity": 1,
-        },
-    ]
+    return code
 
 
-    runner_code = f"""
+# ---------------- SUBPROCESS RUNNER ----------------
+# Educational isolation only; not a production sandbox.
+
+def run_generated(code, records, timeout=5):
+    validate_code(code)
+
+    runner = f"""
 import json
 
 {code}
 
-records = {repr(test_records)}
-
+records = {repr(records)}
 result = generated_tool(records)
-
 print(json.dumps(result))
 """
 
-
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".py",
-        delete=False
-    ) as temp_file:
-
-        temp_file.write(runner_code)
-
-        temp_path = temp_file.name
-
+    path = None
 
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".py",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            f.write(runner)
+            path = f.name
 
         process = subprocess.run(
-
-            [
-                "python",
-                temp_path
-            ],
-
+            [sys.executable, path],
             capture_output=True,
-
             text=True,
-
-            timeout=5
+            timeout=timeout,
         )
-
 
         if process.returncode != 0:
-
             return {
-                "passed": False,
-                "error": process.stderr
+                "success": False,
+                "stage": "execution",
+                "error": process.stderr.strip(),
             }
 
+        try:
+            output = json.loads(process.stdout.strip())
+        except json.JSONDecodeError as e:
+            return {
+                "success": False,
+                "stage": "json_validation",
+                "error": str(e),
+            }
 
-        output = process.stdout.strip()
-
-
-        parsed_output = json.loads(output)
-
-
-        return {
-            "passed": True,
-            "output": parsed_output
-        }
-
+        return {"success": True, "output": output}
 
     except subprocess.TimeoutExpired:
-
         return {
-            "passed": False,
-            "error": "Generated tool exceeded time limit."
+            "success": False,
+            "stage": "timeout",
+            "error": "Execution timed out.",
         }
-
-
-    except Exception as error:
-
-        return {
-            "passed": False,
-            "error": str(error)
-        }
-
 
     finally:
-
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-
-# --------------------------------------------------
-# 8. CREATE CALLABLE FUNCTION FROM GENERATED CODE
-# --------------------------------------------------
-
-def create_callable_function(
-    code: str
-):
-
-    validate_generated_code(code)
+        if path and os.path.exists(path):
+            os.remove(path)
 
 
-    safe_builtins = {
-        "len": len,
-        "sum": sum,
-        "min": min,
-        "max": max,
-        "round": round,
-        "sorted": sorted,
-        "enumerate": enumerate,
-        "range": range,
-        "zip": zip,
-        "list": list,
-        "dict": dict,
-        "str": str,
-        "int": int,
-        "float": float,
-        "bool": bool,
-        "abs": abs,
-    }
+# ---------------- SEMANTIC TEST ----------------
 
+def test_generated_tool(code):
+    test_records = [
+        {"product": "A", "price": 100, "quantity": 2},
+        {"product": "B", "price": 200, "quantity": 1},
+    ]
 
-    namespace = {
-        "__builtins__": safe_builtins
-    }
+    result = run_generated(code, test_records)
 
+    if not result["success"]:
+        return {"passed": False, **result}
 
-    exec(
-        code,
-        namespace
-    )
+    output = result["output"]
 
+    try:
+        if not isinstance(output, list) or len(output) != 2:
+            raise ValueError("Expected a list with two rows.")
 
-    return namespace["generated_tool"]
+        by_product = {row["product"]: row for row in output}
 
+        for product in ("A", "B"):
+            row = by_product[product]
 
-# --------------------------------------------------
-# 9. META-TOOL: REQUEST NEW TOOL
-# --------------------------------------------------
+            if row["revenue"] != 200:
+                raise ValueError(
+                    f"Wrong revenue for {product}"
+                )
 
-def request_new_tool(
-    requirement: str
-) -> dict:
+            pct = float(row["contribution_percentage"])
 
-    print("\n========== TOOL CREATION REQUEST ==========")
+            if abs(pct - 50.0) > 0.001:
+                raise ValueError(
+                    f"Wrong contribution for {product}"
+                )
 
-    print("\nRequirement:")
-    print(requirement)
-
-
-    # ----------------------------------------------
-    # BUILD
-    # ----------------------------------------------
-
-    build_result = build_tool_with_llm(
-        requirement
-    )
-
-
-    code = build_result["code"]
-
-
-    print("\n========== GENERATED CODE ==========")
-
-    print(code)
-
-
-    # ----------------------------------------------
-    # TEST
-    # ----------------------------------------------
-
-    test_result = test_generated_tool(
-        code
-    )
-
-
-    print("\n========== TEST RESULT ==========")
-
-    print(test_result)
-
-
-    if not test_result["passed"]:
-
+    except (KeyError, TypeError, ValueError) as e:
         return {
-            "status": "failed",
-            "error": test_result["error"]
+            "passed": False,
+            "stage": "semantic_validation",
+            "error": str(e),
+            "output": output,
         }
 
-
-    # ----------------------------------------------
-    # CREATE CALLABLE
-    # ----------------------------------------------
-
-    generated_function = create_callable_function(
-        code
-    )
+    return {
+        "passed": True,
+        "stage": "complete",
+        "output": output,
+    }
 
 
-    # ----------------------------------------------
-    # WRAPPER THAT AUTOMATICALLY USES DATASET
-    # ----------------------------------------------
+# ---------------- META TOOL ----------------
 
-    def dynamic_dataset_tool():
+def request_new_tool(requirement):
+    print("\n========== TOOL CREATION REQUEST ==========")
+    print(requirement)
 
-        records = DATAFRAME.to_dict(
-            orient="records"
-        )
+    try:
+        code = build_tool(requirement)
+    except Exception as e:
+        return {
+            "status": "failed",
+            "stage": "generation_or_static_validation",
+            "error": str(e),
+        }
 
-        return generated_function(
-            records
-        )
+    print("\n========== GENERATED CODE ==========")
+    print(code)
 
+    test = test_generated_tool(code)
 
-    # ----------------------------------------------
-    # REGISTER NEW TOOL
-    # ----------------------------------------------
+    print("\n========== TEST RESULT ==========")
+    print(test)
+
+    if not test["passed"]:
+        return {
+            "status": "failed",
+            "stage": test.get("stage"),
+            "error": test.get("error"),
+        }
+
+    def generated_dataset_analysis():
+        records = DATAFRAME.to_dict(orient="records")
+        execution = run_generated(code, records)
+
+        if not execution["success"]:
+            raise RuntimeError(str(execution))
+
+        return execution["output"]
 
     registry.register(
-
-        name="generated_dataset_analysis",
-
-        description=requirement,
-
-        parameters={
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False
-        },
-
-        function=dynamic_dataset_tool
+        "generated_dataset_analysis",
+        f"Run the generated capability: {requirement}",
+        EMPTY_SCHEMA,
+        generated_dataset_analysis,
     )
-
 
     return {
         "status": "success",
-
-        "new_tool_name":
-            "generated_dataset_analysis",
-
-        "description":
-            requirement,
-
-        "message":
-            "The new tool was generated, tested, and registered."
+        "new_tool_name": "generated_dataset_analysis",
+        "message": "Tool generated, tested, and registered.",
     }
 
-
-# --------------------------------------------------
-# 10. META TOOL SCHEMA
-# --------------------------------------------------
 
 META_TOOL = {
-
     "type": "function",
-
-    "name": "request_new_tool",
-
-    "description": (
-        "Request creation of a new analytical tool when "
-        "the currently available tools cannot perform the "
-        "calculation required to complete the user's goal."
-    ),
-
-    "parameters": {
-
-        "type": "object",
-
-        "properties": {
-
-            "requirement": {
-
-                "type": "string",
-
-                "description": (
-                    "A precise description of the missing "
-                    "calculation capability."
-                )
-            }
+    "function": {
+        "name": "request_new_tool",
+        "description": (
+            "Create a missing analytical capability when existing "
+            "tools cannot perform the required calculation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requirement": {
+                    "type": "string",
+                    "description": (
+                        "Precise calculation requirement including "
+                        "input fields, formulas, and output fields."
+                    ),
+                }
+            },
+            "required": ["requirement"],
+            "additionalProperties": False,
         },
-
-        "required": [
-            "requirement"
-        ],
-
-        "additionalProperties": False
-    }
+    },
 }
 
 
-# --------------------------------------------------
-# 11. EXECUTE NORMAL OR META TOOL
-# --------------------------------------------------
-
-def execute_agent_tool(
-    tool_name: str,
-    arguments: dict
-):
-
-    if tool_name == "request_new_tool":
-
-        return request_new_tool(
-            requirement=arguments["requirement"]
-        )
+def current_tools():
+    return registry.schemas() + [META_TOOL]
 
 
-    return registry.execute(
-        name=tool_name,
-        arguments=arguments
-    )
+def execute_agent_tool(name, arguments):
+    if name == "request_new_tool":
+        return request_new_tool(arguments["requirement"])
+
+    return registry.execute(name, arguments)
 
 
-# --------------------------------------------------
-# 12. GET CURRENT TOOLS
-# --------------------------------------------------
+# ---------------- MAIN AGENT ----------------
 
-def get_current_tools():
+SYSTEM_PROMPT = """
+You are a data-analysis agent.
 
-    normal_tools = (
-        registry.get_openai_tool_schemas()
-    )
+Goal:
+Complete the user's analytical request using tools.
 
-    return normal_tools + [META_TOOL]
-
-
-# --------------------------------------------------
-# 13. USER GOAL
-# --------------------------------------------------
-
-user_goal = """
-Calculate the revenue contribution percentage
-of every product in the sales dataset.
-
-Revenue for a product is:
-
-price * quantity
-
-Contribution percentage is:
-
-product revenue / total revenue * 100
-
-Return every product with:
-- revenue
-- contribution percentage
+Rules:
+1. Inspect the dataset when useful.
+2. Use an existing tool if it can complete the task.
+3. If the calculation capability is missing, call
+   request_new_tool exactly once with:
+   - input fields
+   - formulas
+   - expected output fields
+4. After successful creation, call
+   generated_dataset_analysis.
+5. Use its observation for the final answer.
+6. Never invent results.
+7. Never repeatedly request the same capability.
+8. Do not finish until the analysis is complete.
 """
 
+USER_GOAL = """
+Calculate revenue contribution percentage for every product.
 
-# --------------------------------------------------
-# 14. FIRST AGENT CALL
-# --------------------------------------------------
+Formula:
+revenue = price * quantity
 
-response = client.responses.create(
+contribution_percentage =
+product revenue / total revenue * 100
 
-    model=MODEL,
+Return:
+- product
+- revenue
+- contribution_percentage
+"""
 
-    instructions="""
-You are an autonomous data analysis agent.
-
-Your goal is to complete the user's analytical request.
-
-First inspect the available tools.
-
-Use existing tools when they can complete the task.
-
-If no existing tool can perform a required calculation,
-call request_new_tool with a precise requirement.
-
-After a new tool is successfully created,
-use the newly available tool.
-
-Continue until the user's goal is complete.
-
-Do not manually invent calculation results.
-""",
-
-    input=[
-        {
-            "role": "user",
-            "content": user_goal
-        }
-    ],
-
-    tools=get_current_tools()
-)
+messages = [
+    {"role": "system", "content": SYSTEM_PROMPT},
+    {"role": "user", "content": USER_GOAL},
+]
 
 
-# --------------------------------------------------
-# 15. MAIN AGENT LOOP
-# --------------------------------------------------
+def call_agent(max_retries=3):
+    for attempt in range(1, max_retries + 1):
+        try:
+            return client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=current_tools(),
+                tool_choice="auto",
+                temperature=0
+            )
+
+        except BadRequestError as error:
+            error_text = str(error)
+
+
+            parse_failure = (("output_parse_failed" in error_text) or ("Parsing failed" in error_text))
+
+            if not parse_failure or attempt == max_retries:
+                raise
+
+            print(
+                f"\nParse failure. Retry {attempt}/{max_retries}..."
+            )
+            time.sleep(1)
+
 
 MAX_ITERATIONS = 10
+response = call_agent()
 
 
-for iteration in range(MAX_ITERATIONS):
-
+for iteration in range(1, MAX_ITERATIONS + 1):
     print(
-        f"\n\n========== AGENT ITERATION {iteration + 1} =========="
+        f"\n\n========== ITERATION {iteration} =========="
     )
 
+    assistant = response.choices[0].message
 
-    tool_outputs = []
+    print("\nASSISTANT TEXT:")
+    print(repr(assistant.content))
 
+    tool_calls = assistant.tool_calls or []
 
-    for item in response.output:
+    if tool_calls:
+        messages.append(
+            assistant.model_dump(exclude_none=True)
+        )
 
-        if item.type == "function_call":
+        for call in tool_calls:
+            name = call.function.name
+            raw_arguments = call.function.arguments
 
-            print("\nAGENT CHOSE TOOL:")
-            print(item.name)
-
+            print("\nAGENT ACTION:")
+            print(name)
 
             print("\nARGUMENTS:")
-            print(item.arguments)
+            print(raw_arguments)
 
-
-            arguments = json.loads(
-                item.arguments
-            )
-
-
-            result = execute_agent_tool(
-                tool_name=item.name,
-                arguments=arguments
-            )
-
+            try:
+                arguments = json.loads(raw_arguments)
+                result = execute_agent_tool(
+                    name,
+                    arguments,
+                )
+            except Exception as e:
+                result = {
+                    "status": "error",
+                    "error": str(e),
+                }
 
             print("\nOBSERVATION:")
             print(result)
 
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "name": name,
+                "content": json.dumps(result),
+            })
 
-            tool_outputs.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": json.dumps(result)
-                }
-            )
+        print("\nCURRENT TOOLS:")
+        for tool in current_tools():
+            print("-", tool["function"]["name"])
 
+        response = call_agent()
+        continue
 
-    # ----------------------------------------------
-    # FINISH CONDITION
-    # ----------------------------------------------
+    final_text = (assistant.content or "").strip()
 
-    if not tool_outputs:
-
-        print(
-            "\n========== FINAL ANSWER =========="
-        )
-
-        print(
-            response.output_text
-        )
-
+    if final_text:
+        print("\n========== FINAL ANSWER ==========")
+        print(final_text)
         break
 
-
-    # ----------------------------------------------
-    # IMPORTANT:
-    # REFRESH TOOLS BECAUSE A NEW TOOL
-    # MAY HAVE BEEN REGISTERED
-    # ----------------------------------------------
-
-    response = client.responses.create(
-
-        model=MODEL,
-
-        previous_response_id=response.id,
-
-        input=tool_outputs,
-
-        tools=get_current_tools()
+    messages.append(
+        assistant.model_dump(exclude_none=True)
     )
 
+    messages.append({
+        "role": "user",
+        "content": (
+            "The task is incomplete. Continue. If the capability "
+            "is missing, request it once. If the generated tool "
+            "exists, call it. If results exist, answer now."
+        ),
+    })
+
+    response = call_agent()
 
 else:
-
-    print(
-        "Agent stopped because maximum iterations were reached."
-    )
+    print("\nMaximum iterations reached.")
